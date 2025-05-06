@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-const ws = new WebSocket("ws://localhost:4000");
+const ws = new WebSocket("ws://localhost:4000?role=supervisor");
 
 export default function SupervisorPortal() {
   const [question, setQuestion] = useState(null);

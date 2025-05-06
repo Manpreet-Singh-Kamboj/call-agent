@@ -3,14 +3,33 @@ import * as openai from '@livekit/agents-plugin-openai';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import WebSocket from 'ws';
 import { z } from 'zod';
 import { Question } from './models/question.model';
-import { notifySupervisor, supervisorResponseEmitter } from './supervisorChannel';
+import { supervisorResponseEmitter } from './supervisorChannel';
 import { LearnedAnswer, systemInstructions } from './systemInstructions';
 
+const ws = new WebSocket('ws://localhost:4000?role=agent');
+let session: openai.realtime.RealtimeSession;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.join(__dirname, '../.env.local');
 dotenv.config({ path: envPath });
+
+ws.on('open', () => {
+  console.log('Agent connected to supervisor WebSocket');
+});
+
+ws.on('message', (message) => {
+  try {
+    console.log('Received message from supervisor:', message.toString());
+    const data = JSON.parse(message.toString());
+    if (data.type === 'supervisor-response') {
+      supervisorResponseEmitter.emit(data.questionId, data.answer);
+    }
+  } catch (err) {
+    console.error('Failed to parse WebSocket message:', err);
+  }
+});
 
 export default defineAgent({
   entry: async (ctx: JobContext) => {
@@ -35,11 +54,16 @@ export default defineAgent({
         }),
         execute: async ({ question }) => {
           const questionId = `q_${Date.now()}`;
-          await Question.create({
-            questionId,
-            questionText: question,
+          await fetch('http://localhost:4000/api/help/webhook', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              questionId,
+              questionText: question,
+            }),
           });
-          notifySupervisor(questionId, question);
           return await new Promise((resolve) => {
             const timeout = setTimeout(async () => {
               supervisorResponseEmitter.removeAllListeners(questionId);
@@ -47,15 +71,12 @@ export default defineAgent({
               resolve('Sorry, our supervisors are currently unavailable.');
             }, 60_000);
             supervisorResponseEmitter.once(questionId, async (answer) => {
+              console.log('answer', answer);
               clearTimeout(timeout);
-              await Question.updateOne(
-                { questionId },
-                {
-                  status: 'answered',
-                  answer,
-                  answeredAt: new Date(),
-                },
-              );
+              //@ts-ignore
+              session.conversation.item.delete();
+              //@ts-ignore
+              session.conversation.item.create({ content: answer, role: 'assistant' });
               resolve(answer);
             });
           });
@@ -64,7 +85,7 @@ export default defineAgent({
     };
 
     const agent = new multimodal.MultimodalAgent({ model, fncCtx });
-    const session = await agent
+    session = await agent
       .start(ctx.room, participant)
       .then((session) => session as openai.realtime.RealtimeSession);
     //@ts-ignore
